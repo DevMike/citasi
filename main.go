@@ -48,9 +48,11 @@ func main() {
 			takeErrorScreenshot(page, cfg, cycle)
 
 			if strings.Contains(err.Error(), "WAF") {
-				// WAF block: restart browser and use longer backoff (15-20 min)
-				log.Printf("WAF block detected, restarting browser and backing off...")
-				launchNewBrowser()
+				// WAF block: keep the same browser session (don't restart — F5
+				// cookies are server-side tied to the connection). Just navigate
+				// away and wait for the rate limit to reset.
+				log.Printf("WAF block detected, backing off (keeping session)...")
+				_ = rod.Try(func() { page.MustNavigate("about:blank") })
 				backoff := time.Duration(900+rand.IntN(300)) * time.Second
 				log.Printf("Next check in %s", backoff)
 				time.Sleep(backoff)
@@ -67,6 +69,7 @@ func main() {
 		} else {
 			tracker.ShouldNotify(false)
 			log.Printf("No availability")
+			SendTelegramMessage(cfg, "No citas disponibles.")
 		}
 
 		// Navigate to about:blank between cycles to clear page state

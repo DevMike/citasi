@@ -86,15 +86,29 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 	result := &CheckResult{}
 	t := stepTimeout(cfg)
 
-	// Step 1: Navigate to the ICP page
+	// Step 1: Navigate to the ICP page with a warm-up visit.
+	// The first load lets F5 WAF JavaScript set session cookies (TS*, TSPD_*).
+	// Then we navigate away and back so the form POST carries valid cookies.
 	url := getBaseURL(cfg.Province)
+	log.Printf("[flow] warming up session...")
+	if err := rod.Try(func() {
+		page.Timeout(t).MustNavigate(url).MustWaitLoad()
+	}); err != nil {
+		return nil, fmt.Errorf("navigate (warmup): %w", err)
+	}
+	// Let F5 JS challenge fully execute and set cookies
+	time.Sleep(time.Duration(8000+rand.IntN(4000)) * time.Millisecond)
+
+	// Navigate away and back — this simulates a real user revisiting
+	_ = rod.Try(func() { page.MustNavigate("about:blank") })
+	time.Sleep(time.Duration(2000+rand.IntN(2000)) * time.Millisecond)
+
 	log.Printf("[flow] navigating to %s", url)
 	if err := rod.Try(func() {
 		page.Timeout(t).MustNavigate(url).MustWaitLoad()
 	}); err != nil {
 		return nil, fmt.Errorf("navigate: %w", err)
 	}
-	// Wait for F5 WAF JavaScript challenge to execute and set cookies.
 	time.Sleep(time.Duration(5000+rand.IntN(3000)) * time.Millisecond)
 	randomDelay()
 
@@ -231,7 +245,7 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 	}
 
 	// Read page text — the site may go directly to availability result
-	log.Printf("[flow] checking page after submit...")
+	log.Printf("[flow] checking result page...")
 	bodyText := ""
 	if err := rod.Try(func() {
 		bodyText = page.Timeout(t).MustElement("body").MustText()
@@ -239,7 +253,12 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 		return nil, fmt.Errorf("read body text: %w", err)
 	}
 
-	// If availability result already shown, return immediately — no further steps needed
+	// If body text is too short, the page likely didn't load properly
+	if len(strings.TrimSpace(bodyText)) < 50 {
+		return nil, fmt.Errorf("page body too short after submit (possible loading issue): %q", truncate(bodyText, 100))
+	}
+
+	// Check for no-availability message
 	if containsNoAvailability(bodyText) {
 		log.Printf("[flow] no availability (direct result)")
 		result.Available = false
@@ -248,94 +267,29 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 		return result, nil
 	}
 
-	// Step 6: Check for CAPTCHA
+	// Check for CAPTCHA
 	if hasCaptcha(page) {
 		log.Printf("[flow] CAPTCHA detected — waiting for manual solve")
 		PlayAlertSound()
 		waitForCaptchaSolve(page)
 		log.Printf("[flow] CAPTCHA appears solved, continuing")
 		longRandomDelay()
-	}
 
-	// Step 7: Select office if a second office selector appears
-	if hasOffice, _, _ := page.Has(SelOfficeLater); hasOffice {
-		log.Printf("[flow] selecting office")
+		// Re-read after CAPTCHA solve
 		if err := rod.Try(func() {
-			sel := page.Timeout(t).MustElement(SelOfficeLater)
-			opts := sel.MustElements("option")
-			for _, opt := range opts {
-				val := opt.MustProperty("value").String()
-				if val != "" && val != "0" {
-					opt.MustClick()
-					break
-				}
-			}
+			bodyText = page.Timeout(t).MustElement("body").MustText()
 		}); err != nil {
-			return nil, fmt.Errorf("select office: %w", err)
+			return nil, fmt.Errorf("read body after captcha: %w", err)
 		}
-		longRandomDelay()
-
-		if hasSiguiente, _, _ := page.Has(SelBtnSiguiente); hasSiguiente {
-			log.Printf("[flow] clicking Siguiente")
-			if err := rod.Try(func() {
-				page.Timeout(t).MustElement(SelBtnSiguiente).MustClick()
-			}); err != nil {
-				return nil, fmt.Errorf("click siguiente: %w", err)
-			}
-			time.Sleep(5 * time.Second)
-		}
-	}
-
-	// Step 8: Fill contact info if present (using keyboard events)
-	if cfg.Phone != "" {
-		if hasPhone, _, _ := page.Has(SelPhone); hasPhone {
-			log.Printf("[flow] filling phone")
-			_ = humanType(page, SelPhone, cfg.Phone, t)
-			randomDelay()
-		}
-	}
-
-	if cfg.Email != "" {
-		if hasEmail, _, _ := page.Has(SelEmail1); hasEmail {
-			log.Printf("[flow] filling email")
-			_ = humanType(page, SelEmail1, cfg.Email, t)
-			randomDelay()
-		}
-		if hasEmail2, _, _ := page.Has(SelEmail2); hasEmail2 {
-			_ = humanType(page, SelEmail2, cfg.Email, t)
-			randomDelay()
-		}
-	}
-
-	// Submit contact form if there's a button to click
-	for _, sel := range []string{SelBtnEnviar, SelBtnSiguiente} {
-		if has, _, _ := page.Has(sel); has {
-			log.Printf("[flow] clicking submit button")
-			_ = rod.Try(func() { page.Timeout(t).MustElement(sel).MustClick() })
-			time.Sleep(5 * time.Second)
-			break
-		}
-	}
-
-	// Re-read page text for final availability check
-	log.Printf("[flow] checking availability")
-	if err := rod.Try(func() {
-		bodyText = page.Timeout(t).MustElement("body").MustText()
-	}); err != nil {
-		return nil, fmt.Errorf("read body text: %w", err)
 	}
 
 	if isWAFBlocked(page) {
 		return nil, fmt.Errorf("WAF blocked at availability check")
 	}
 
-	result.Available = !containsNoAvailability(bodyText)
-	if result.Available {
-		result.Details = fmt.Sprintf("Slots may be available!\nPage text snippet: %s", truncate(bodyText, 500))
-	} else {
-		result.Details = "No availability detected"
-	}
-
+	// Page has content but no "no availability" text — slots may be available
+	result.Available = true
+	result.Details = fmt.Sprintf("Slots may be available!\nPage text snippet: %s", truncate(bodyText, 500))
 	takeCheckScreenshot(page, cfg, result)
 	return result, nil
 }
