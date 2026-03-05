@@ -19,11 +19,16 @@ const (
 	SelName        = "#txtDesCitado"
 	SelBtnEnviar   = "#btnEnviar"
 
-	// Page 4: Office selection (may appear after personal data)
+	// Page 4: Options page ("Solicitar Cita", "Consultar Citas Confirmadas", etc.)
+	SelBtnSolicitarCita = "#btnSolicitar"
+	// Text to detect the options page
+	SelOptionsPageText = "A continuación puedes seleccionar cualquiera de las siguientes opciones"
+
+	// Page 5: Office selection (may appear after "Solicitar Cita")
 	SelOfficeLater  = "#idSede"
 	SelBtnSiguiente = "#btnSiguiente"
 
-	// Page 5: Contact info
+	// Page 6: Contact info
 	SelPhone  = "#txtTelefonoCitado"
 	SelEmail1 = "#emailUNO"
 	SelEmail2 = "#emailDOS"

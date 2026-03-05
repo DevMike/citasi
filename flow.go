@@ -245,6 +245,7 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 	}
 
 	// Read page text — the site may go directly to availability result
+	// or show the options page with "Solicitar Cita"
 	log.Printf("[flow] checking result page...")
 	bodyText := ""
 	if err := rod.Try(func() {
@@ -258,7 +259,7 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 		return nil, fmt.Errorf("page body too short after submit (possible loading issue): %q", truncate(bodyText, 100))
 	}
 
-	// Check for no-availability message
+	// Check for no-availability message (can appear directly after submit)
 	if containsNoAvailability(bodyText) {
 		log.Printf("[flow] no availability (direct result)")
 		result.Available = false
@@ -287,11 +288,127 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 		return nil, fmt.Errorf("WAF blocked at availability check")
 	}
 
-	// Page has content but no "no availability" text — slots may be available
+	// Step 6: Handle the options page ("Solicitar Cita" / "Consultar Citas" / etc.)
+	// This page appears after successful personal data submission.
+	// We must click "Solicitar Cita" to proceed to actual availability.
+	if isOptionsPage(page, bodyText) {
+		log.Printf("[flow] options page detected — clicking 'Solicitar Cita'")
+		takeCheckScreenshot(page, cfg, result) // screenshot the options page for debugging
+		longRandomDelay()
+
+		if err := clickSolicitarCita(page, t); err != nil {
+			return nil, fmt.Errorf("click Solicitar Cita: %w", err)
+		}
+
+		// Wait for next page after clicking "Solicitar Cita"
+		time.Sleep(time.Duration(5000+rand.IntN(3000)) * time.Millisecond)
+
+		if isWAFBlocked(page) {
+			return nil, fmt.Errorf("WAF blocked after Solicitar Cita")
+		}
+
+		// Step 7: Handle office selection if it appears
+		if hasOffice, _, _ := page.Has(SelOfficeLater); hasOffice {
+			log.Printf("[flow] office selection page detected")
+			if err := rod.Try(func() {
+				// Select first available office option (not the placeholder)
+				el := page.Timeout(t).MustElement(SelOfficeLater)
+				// Try to select an option — use the first real option
+				opts := el.MustElements("option")
+				for _, opt := range opts {
+					val := opt.MustProperty("value").String()
+					if val != "" && val != "0" {
+						el.MustSelect(opt.MustText())
+						break
+					}
+				}
+			}); err != nil {
+				log.Printf("[flow] office selection error (continuing): %v", err)
+			}
+			longRandomDelay()
+
+			// Click Siguiente if present
+			if hasSig, _, _ := page.Has(SelBtnSiguiente); hasSig {
+				log.Printf("[flow] clicking Siguiente")
+				if err := rod.Try(func() {
+					page.Timeout(t).MustElement(SelBtnSiguiente).MustClick()
+				}); err != nil {
+					return nil, fmt.Errorf("click siguiente: %w", err)
+				}
+				time.Sleep(time.Duration(5000+rand.IntN(3000)) * time.Millisecond)
+			}
+		}
+
+		// Re-read the page after proceeding past options/office
+		if err := rod.Try(func() {
+			bodyText = page.Timeout(t).MustElement("body").MustText()
+		}); err != nil {
+			return nil, fmt.Errorf("read body after solicitar cita: %w", err)
+		}
+
+		if isWAFBlocked(page) {
+			return nil, fmt.Errorf("WAF blocked at final availability check")
+		}
+
+		// Now check for the actual availability result
+		if containsNoAvailability(bodyText) {
+			log.Printf("[flow] no availability (after Solicitar Cita)")
+			result.Available = false
+			result.Details = "No availability detected (after Solicitar Cita)"
+			takeCheckScreenshot(page, cfg, result)
+			return result, nil
+		}
+	}
+
+	// If we're here, page has content without "no availability" text
+	// This means actual appointment slots may be shown
 	result.Available = true
 	result.Details = fmt.Sprintf("Slots may be available!\nPage text snippet: %s", truncate(bodyText, 500))
 	takeCheckScreenshot(page, cfg, result)
 	return result, nil
+}
+
+// isOptionsPage checks if the current page is the intermediate options page
+// with "Solicitar Cita", "Consultar Citas Confirmadas", etc.
+func isOptionsPage(page *rod.Page, bodyText string) bool {
+	// Check by page text content
+	if strings.Contains(bodyText, SelOptionsPageText) {
+		return true
+	}
+	// Check by "Solicitar Cita" button presence
+	if has, _, _ := page.Has(SelBtnSolicitarCita); has {
+		return true
+	}
+	// Also try finding by button text (in case the ID is different)
+	has, _, _ := page.Has("input[value='Solicitar Cita']")
+	return has
+}
+
+// clickSolicitarCita clicks the "Solicitar Cita" button on the options page.
+// Tries multiple selectors since the exact button ID may vary.
+func clickSolicitarCita(page *rod.Page, t time.Duration) error {
+	// Try by ID first
+	if has, _, _ := page.Has(SelBtnSolicitarCita); has {
+		return rod.Try(func() {
+			page.Timeout(t).MustElement(SelBtnSolicitarCita).MustClick()
+		})
+	}
+	// Try input[value='Solicitar Cita']
+	if has, _, _ := page.Has("input[value='Solicitar Cita']"); has {
+		return rod.Try(func() {
+			page.Timeout(t).MustElement("input[value='Solicitar Cita']").MustClick()
+		})
+	}
+	// Try button/a with text
+	if has, _, _ := page.Has("a[value='Solicitar Cita']"); has {
+		return rod.Try(func() {
+			page.Timeout(t).MustElement("a[value='Solicitar Cita']").MustClick()
+		})
+	}
+	// Last resort: use ElementR for regex text match on any clickable element
+	return rod.Try(func() {
+		page.Timeout(t).MustElementR("a, button, input[type='submit'], input[type='button']", "Solicitar Cita").MustClick()
+	})
 }
 
 func docTypeSelector(docType string) string {

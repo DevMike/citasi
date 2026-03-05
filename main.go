@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -24,11 +26,24 @@ func main() {
 	var page *rod.Page
 	var cleanup func()
 
+	// killChrome forcefully kills any lingering Chrome processes using our profile.
+	killChrome := func() {
+		_ = exec.Command("pkill", "-f", "citasi-chrome-profile").Run()
+		time.Sleep(2 * time.Second)
+	}
+
 	// launchNewBrowser creates a fresh browser instance.
 	launchNewBrowser := func() {
 		if cleanup != nil {
-			cleanup()
+			// Try graceful close, ignore errors if connection is dead
+			func() {
+				defer func() { recover() }()
+				cleanup()
+			}()
+			cleanup = nil
 		}
+		// Kill any lingering Chrome to avoid "Opening in existing browser session"
+		killChrome()
 		_, page, cleanup = LaunchBrowser(cfg)
 	}
 
@@ -48,14 +63,15 @@ func main() {
 			takeErrorScreenshot(page, cfg, cycle)
 
 			if strings.Contains(err.Error(), "WAF") {
-				// WAF block: keep the same browser session (don't restart — F5
-				// cookies are server-side tied to the connection). Just navigate
-				// away and wait for the rate limit to reset.
-				log.Printf("WAF block detected, backing off (keeping session)...")
-				_ = rod.Try(func() { page.MustNavigate("about:blank") })
+				// WAF block: back off and restart browser.
+				// The long backoff causes CDP connections to go stale,
+				// so we restart with a fresh connection (same profile = same cookies).
+				log.Printf("WAF block detected, backing off...")
 				backoff := time.Duration(900+rand.IntN(300)) * time.Second
+				SendTelegramMessage(cfg, fmt.Sprintf("WAF blocked. Backing off for %s.", backoff.Round(time.Second)))
 				log.Printf("Next check in %s", backoff)
 				time.Sleep(backoff)
+				launchNewBrowser()
 				continue
 			}
 
