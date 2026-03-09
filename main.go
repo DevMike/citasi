@@ -88,9 +88,14 @@ func main() {
 				continue
 			}
 
-			// Other errors: restart browser and use normal interval
+			if strings.Contains(err.Error(), "server error") {
+				// Server-side 500: transient, no browser restart needed.
+				log.Printf("ICP server error (HTTP 500), will retry next cycle")
+			} else {
+				// Other errors: restart browser and use normal interval
+				launchNewBrowser()
+			}
 			SendTelegramMessage(cfg, "Cycle error: "+err.Error())
-			launchNewBrowser()
 		} else if result.Available && tracker.ShouldNotify(true) {
 			log.Printf("SLOTS AVAILABLE!")
 			SendTelegramNotification(cfg, result)

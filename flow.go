@@ -81,6 +81,17 @@ func isWAFBlocked(page *rod.Page) bool {
 	return strings.Contains(title, "Request Rejected")
 }
 
+// isServerError checks if the current page is an HTTP 500 Internal Server Error.
+func isServerError(page *rod.Page) bool {
+	body := ""
+	if err := rod.Try(func() {
+		body = page.MustEval(`() => document.body.innerText`).String()
+	}); err != nil {
+		return false
+	}
+	return strings.Contains(body, "Internal Server Error")
+}
+
 // RunSingleCheck executes the full form flow and checks availability.
 func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 	result := &CheckResult{}
@@ -157,6 +168,9 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 		if isWAFBlocked(page) {
 			return nil, fmt.Errorf("WAF blocked: the site rejected our request (rate limited)")
 		}
+		if isServerError(page) {
+			return nil, fmt.Errorf("server error: ICP site returned HTTP 500")
+		}
 		return nil, fmt.Errorf("wait for info page: %w", err)
 	}
 	longRandomDelay()
@@ -178,6 +192,9 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 	}); err != nil {
 		if isWAFBlocked(page) {
 			return nil, fmt.Errorf("WAF blocked after entrar")
+		}
+		if isServerError(page) {
+			return nil, fmt.Errorf("server error: ICP site returned HTTP 500")
 		}
 		return nil, fmt.Errorf("wait for personal data form: %w", err)
 	}
@@ -243,6 +260,9 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 	if isWAFBlocked(page) {
 		return nil, fmt.Errorf("WAF blocked after personal data submit")
 	}
+	if isServerError(page) {
+		return nil, fmt.Errorf("server error: ICP site returned HTTP 500")
+	}
 
 	// Read page text — the site may go directly to availability result
 	// or show the options page with "Solicitar Cita"
@@ -287,6 +307,9 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 	if isWAFBlocked(page) {
 		return nil, fmt.Errorf("WAF blocked at availability check")
 	}
+	if isServerError(page) {
+		return nil, fmt.Errorf("server error: ICP site returned HTTP 500")
+	}
 
 	// Step 6: Handle the options page ("Solicitar Cita" / "Consultar Citas" / etc.)
 	// This page appears after successful personal data submission.
@@ -305,6 +328,9 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 
 		if isWAFBlocked(page) {
 			return nil, fmt.Errorf("WAF blocked after Solicitar Cita")
+		}
+		if isServerError(page) {
+			return nil, fmt.Errorf("server error: ICP site returned HTTP 500")
 		}
 
 		// Step 7: Handle office selection if it appears
@@ -348,6 +374,9 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 
 		if isWAFBlocked(page) {
 			return nil, fmt.Errorf("WAF blocked at final availability check")
+		}
+		if isServerError(page) {
+			return nil, fmt.Errorf("server error: ICP site returned HTTP 500")
 		}
 
 		// Now check for the actual availability result
