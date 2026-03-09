@@ -54,8 +54,21 @@ func main() {
 		}
 	}()
 
+	// browserAlive checks if the CDP connection to Chrome is still working.
+	browserAlive := func() bool {
+		err := rod.Try(func() {
+			page.MustEval(`() => document.title`)
+		})
+		return err == nil
+	}
+
 	for cycle := 1; cfg.MaxCycles == 0 || cycle <= cfg.MaxCycles; cycle++ {
 		log.Printf("--- Cycle %d ---", cycle)
+
+		if !browserAlive() {
+			log.Printf("Browser connection lost, restarting...")
+			launchNewBrowser()
+		}
 
 		result, err := RunSingleCheck(page, cfg)
 		if err != nil {
