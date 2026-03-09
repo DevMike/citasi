@@ -99,7 +99,7 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 
 	// Step 1: Navigate to the ICP page with a warm-up visit.
 	// The first load lets F5 WAF JavaScript set session cookies (TS*, TSPD_*).
-	// Then we navigate away and back so the form POST carries valid cookies.
+	// We stay on the page (no about:blank bounce) to look more natural.
 	url := getBaseURL(cfg.Province)
 	log.Printf("[flow] warming up session...")
 	if err := rod.Try(func() {
@@ -107,18 +107,28 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 	}); err != nil {
 		return nil, fmt.Errorf("navigate (warmup): %w", err)
 	}
-	// Let F5 JS challenge fully execute and set cookies
-	time.Sleep(time.Duration(8000+rand.IntN(4000)) * time.Millisecond)
+	if isWAFBlocked(page) {
+		return nil, fmt.Errorf("WAF blocked on warmup navigation")
+	}
+	if isServerError(page) {
+		return nil, fmt.Errorf("server error: ICP site returned HTTP 500")
+	}
+	// Let F5 JS challenge fully execute and set cookies (12-18s)
+	time.Sleep(time.Duration(12000+rand.IntN(6000)) * time.Millisecond)
 
-	// Navigate away and back — this simulates a real user revisiting
-	_ = rod.Try(func() { page.MustNavigate("about:blank") })
-	time.Sleep(time.Duration(2000+rand.IntN(2000)) * time.Millisecond)
-
+	// Reload the page — cookies are now set, so this visit carries valid session.
+	// A reload is more natural than navigating away and back.
 	log.Printf("[flow] navigating to %s", url)
 	if err := rod.Try(func() {
 		page.Timeout(t).MustNavigate(url).MustWaitLoad()
 	}); err != nil {
 		return nil, fmt.Errorf("navigate: %w", err)
+	}
+	if isWAFBlocked(page) {
+		return nil, fmt.Errorf("WAF blocked on main navigation")
+	}
+	if isServerError(page) {
+		return nil, fmt.Errorf("server error: ICP site returned HTTP 500")
 	}
 	time.Sleep(time.Duration(5000+rand.IntN(3000)) * time.Millisecond)
 	randomDelay()
@@ -158,6 +168,16 @@ func RunSingleCheck(page *rod.Page, cfg *Config) (*CheckResult, error) {
 		page.Timeout(t).MustElement(SelBtnAceptar).MustClick()
 	}); err != nil {
 		return nil, fmt.Errorf("click aceptar: %w", err)
+	}
+
+	// Wait briefly for the page to start loading, then check for errors early
+	// before committing to the full element timeout.
+	time.Sleep(3 * time.Second)
+	if isWAFBlocked(page) {
+		return nil, fmt.Errorf("WAF blocked after clicking Aceptar")
+	}
+	if isServerError(page) {
+		return nil, fmt.Errorf("server error: ICP site returned HTTP 500")
 	}
 
 	// Wait for the info page to load (it navigates to a new URL)

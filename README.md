@@ -72,7 +72,7 @@ CHECK_JITTER=60
 4. Checks if appointments are available
 5. If available: sends Telegram notification with screenshot, plays sound alert
 6. If not: waits for the configured interval and repeats
-7. On WAF block: backs off for 15-20 minutes automatically
+7. On WAF block: exponential backoff (15-20 min, doubling on consecutive blocks, capped at ~60 min)
 
 ## CAPTCHA
 

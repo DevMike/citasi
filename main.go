@@ -22,6 +22,7 @@ func main() {
 	SendTelegramMessage(cfg, "citasi started. Monitoring for appointments...")
 
 	tracker := NewStateTracker()
+	consecutiveWAF := 0
 
 	var page *rod.Page
 	var cleanup func()
@@ -76,12 +77,13 @@ func main() {
 			takeErrorScreenshot(page, cfg, cycle)
 
 			if strings.Contains(err.Error(), "WAF") {
-				// WAF block: back off and restart browser.
-				// The long backoff causes CDP connections to go stale,
-				// so we restart with a fresh connection (same profile = same cookies).
-				log.Printf("WAF block detected, backing off...")
-				backoff := time.Duration(900+rand.IntN(300)) * time.Second
-				SendTelegramMessage(cfg, fmt.Sprintf("WAF blocked. Backing off for %s.", backoff.Round(time.Second)))
+				consecutiveWAF++
+				// Exponential backoff: 15-20 min base, doubled each consecutive hit, capped at 60 min.
+				baseSeconds := 900 + rand.IntN(300) // 15-20 min
+				multiplier := 1 << min(consecutiveWAF-1, 2) // 1x, 2x, 4x (cap at 4x = ~60-80 min)
+				backoff := time.Duration(baseSeconds*multiplier) * time.Second
+				log.Printf("WAF block detected (consecutive: %d), backing off...", consecutiveWAF)
+				SendTelegramMessage(cfg, fmt.Sprintf("WAF blocked (%d in a row). Backing off for %s.", consecutiveWAF, backoff.Round(time.Second)))
 				log.Printf("Next check in %s", backoff)
 				time.Sleep(backoff)
 				launchNewBrowser()
@@ -96,21 +98,18 @@ func main() {
 				launchNewBrowser()
 			}
 			SendTelegramMessage(cfg, "Cycle error: "+err.Error())
-		} else if result.Available && tracker.ShouldNotify(true) {
-			log.Printf("SLOTS AVAILABLE!")
-			SendTelegramNotification(cfg, result)
-			PlayAlertSound()
 		} else {
-			tracker.ShouldNotify(false)
-			log.Printf("No availability")
-			SendTelegramMessage(cfg, "No citas disponibles.")
+			consecutiveWAF = 0
+			if result.Available && tracker.ShouldNotify(true) {
+				log.Printf("SLOTS AVAILABLE!")
+				SendTelegramNotification(cfg, result)
+				PlayAlertSound()
+			} else {
+				tracker.ShouldNotify(false)
+				log.Printf("No availability")
+				SendTelegramMessage(cfg, "No citas disponibles.")
+			}
 		}
-
-		// Navigate to about:blank between cycles to clear page state
-		// but keep the same browser session (cookies persist)
-		_ = rod.Try(func() {
-			page.MustNavigate("about:blank")
-		})
 
 		jitter := time.Duration(rand.IntN(cfg.CheckJitter+1)) * time.Second
 		sleep := time.Duration(cfg.CheckInterval)*time.Second + jitter
